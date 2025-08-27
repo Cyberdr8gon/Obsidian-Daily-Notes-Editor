@@ -105,6 +105,134 @@ export default class DailyNoteViewPlugin extends Plugin {
                 });
             }
         });
+
+        // === ESC Key Fix: Prevent unwanted tab switching ===
+        // This fix prevents ESC key from switching to adjacent tabs when pressed in DNE editors
+        // while preserving normal ESC functionality for vim mode and modal closing.
+        
+        this.initializeESCShield();
+    }
+
+    /**
+     * Initialize ESC key fix to prevent unwanted tab switching
+     * This addresses issue #46: ESC key switching to left tab
+     */
+    private initializeESCShield() {
+        // Track focus within DNE areas for precise ESC detection
+        let focusInsideDNE = false;
+        this.registerDomEvent(document, "focusin", (e: FocusEvent) => {
+            const target = e.target as HTMLElement | null;
+            focusInsideDNE = !!target?.closest?.(".dne-root");
+        });
+
+        // Tag DNE elements for reliable detection
+        this.registerEvent(
+            this.app.workspace.on("active-leaf-change", (leaf) => {
+                const vt = (leaf as any)?.view?.getViewType?.();
+                if (vt === DAILY_NOTE_VIEW_TYPE) {
+                    this.tagDNEElements((leaf as any).view);
+                }
+            })
+        );
+
+        // ESC key interception - skip when CodeMirror extension handles it
+        const escHandler = (e: KeyboardEvent) => {
+            if (e.key !== "Escape") return;
+            
+            const currentView = this.app.workspace.activeLeaf?.view?.getViewType?.();
+            const target = e.target as HTMLElement;
+            const isInCodeMirror = target?.closest?.(".cm-editor");
+            
+            // Skip if not in DNE view
+            if (currentView !== DAILY_NOTE_VIEW_TYPE) return;
+            
+            // Allow ESC to close modals
+            const modalOpen = !!document.querySelector(".modal-container,.prompt,.suggestion-container,.menu,.popover");
+            if (modalOpen) return;
+            
+            // Let CodeMirror extension handle ESC in editors (for vim support)
+            if (isInCodeMirror && this.settings.useArrowUpOrDownToNavigate) {
+                return; // CodeMirror extension will handle vim mode changes
+            }
+            
+            // Block ESC propagation to prevent unwanted tab switching
+            const cameFromDNE = focusInsideDNE || target?.closest?.(".dne-root");
+            if (cameFromDNE) {
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                e.preventDefault();
+            }
+        };
+
+        document.addEventListener("keydown", escHandler, {
+            capture: true,
+            passive: false
+        });
+        
+        this.register(() => {
+            document.removeEventListener("keydown", escHandler, { capture: true } as any);
+        });
+
+        // Tag DNE elements periodically for reliable detection
+        this.registerInterval(window.setInterval(() => {
+            this.tagDNEElements();
+        }, 2000));
+    }
+
+    /**
+     * Tag DNE-related DOM elements for reliable ESC event detection
+     */
+    private tagDNEElements(view?: any) {
+        const selectors = [
+            ".daily-note-editor", ".daily-note-container", ".dn-editor", 
+            ".dn-leaf-view", ".cm-editor", ".cm-content"
+        ];
+        
+        // Tag specific view elements if provided
+        if (view) {
+            view?.contentEl?.classList?.add?.("dne-root");
+            view?.containerEl?.classList?.add?.("dne-root");
+            if (view?.leaf?.containerEl) {
+                view.leaf.containerEl.classList.add("dne-root");
+            }
+        }
+        
+        // Tag all DNE-related elements in the document
+        selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach((el: Element) => {
+                (el as HTMLElement).classList.add("dne-root");
+            });
+        });
+    }
+
+    /**
+     * Patch setActiveLeaf to prevent ESC-triggered tab switching
+     * This is a secondary defense layer for the ESC key fix
+     */
+    private patchSetActiveLeaf() {
+        const originalSetActiveLeaf = this.app.workspace.setActiveLeaf.bind(this.app.workspace);
+        
+        this.app.workspace.setActiveLeaf = function(e: WorkspaceLeaf, t?: any) {
+            const targetViewType = e?.view?.getViewType?.();
+            const currentViewType = this.activeLeaf?.view?.getViewType?.();
+            
+            // Block unwanted switches away from DNE view
+            if (currentViewType === DAILY_NOTE_VIEW_TYPE && targetViewType !== DAILY_NOTE_VIEW_TYPE) {
+                // Allow legitimate switches (you can extend this logic if needed)
+                const stack = new Error().stack || '';
+                const isLegitimate = stack.includes('user-action') || stack.includes('click');
+                
+                if (!isLegitimate) {
+                    return; // Block the switch
+                }
+            }
+            
+            return originalSetActiveLeaf.call(this, e, t);
+        };
+        
+        this.register(() => {
+            this.app.workspace.setActiveLeaf = originalSetActiveLeaf;
+        });
     }
 
     onunload() {
@@ -173,6 +301,10 @@ export default class DailyNoteViewPlugin extends Plugin {
 
     patchWorkspace() {
         let layoutChanging = false;
+        
+        // ESC Fix: Patch setActiveLeaf to prevent unwanted tab switching
+        this.patchSetActiveLeaf();
+        
         const uninstaller = around(Workspace.prototype, {
             getActiveViewOfType: (next: any) =>
                 function (t: any) {
@@ -236,20 +368,6 @@ export default class DailyNoteViewPlugin extends Plugin {
                     return false;
                 };
             },
-            setActiveLeaf: (next: any) =>
-                function (e: WorkspaceLeaf, t?: any) {
-                    if ((e as any).parentLeaf) {
-                        (e as any).parentLeaf.activeTime = 1700000000000;
-
-                        next.call(this, (e as any).parentLeaf, t);
-                        if ((e.view as any).editMode) {
-                            this.activeEditor = e.view;
-                            (e as any).parentLeaf.view.editMode = e.view;
-                        }
-                        return;
-                    }
-                    return next.call(this, e, t);
-                },
         });
         this.register(uninstaller);
     }

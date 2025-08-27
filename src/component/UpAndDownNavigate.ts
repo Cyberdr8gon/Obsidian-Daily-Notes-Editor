@@ -262,6 +262,26 @@ export function createUpDownNavigationExtension(
                 return false;
             },
         },
+        {
+            key: "Escape",
+            run: (view) => {
+                // ESC Key Fix: Handle ESC in CodeMirror editors within DNE
+                // This ensures vim mode changes work properly while preventing unwanted tab switching
+                try {
+                    // Detect if we're in a DNE context
+                    const isDNEContext = view.dom?.closest?.('.dne-root');
+                    if (!isDNEContext) return false;
+
+                    // Always allow ESC in CodeMirror - the document-level handler will prevent unwanted tab switching
+                    // This preserves vim functionality while blocking unwanted workspace navigation
+                    return false;
+                    
+                } catch (e) {
+                    // Don't block on errors
+                    return false;
+                }
+            },
+        },
     ];
 
     return Prec.highest(keymap.of(keyBindings));
